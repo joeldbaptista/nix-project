@@ -10,6 +10,15 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: fortune/app
+  ECS_CLUSTER: fortune
+  ECS_SERVICE: app
+  TASK_FAMILY: fortune-app
+  CONTAINER_NAME: app
 
 jobs:
   lint:
@@ -41,3 +50,113 @@ jobs:
           python-version: "3.13"
       - run: pip install --quiet -e ".[dev]"
       - run: pytest -q
+
+  build:
+    name: Build and push image
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Assume the app role by OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_APP_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build container image
+        run: |
+          docker build \
+            --build-arg GIT_SHA="${GITHUB_SHA}" \
+            -t "${REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
+            -t "${REGISTRY}/${ECR_REPOSITORY}:main" \
+            .
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+
+      - name: Push image to ECR
+        id: push
+        run: |
+          docker push "${REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker push "${REGISTRY}/${ECR_REPOSITORY}:main"
+          echo "image=${REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+
+  deploy:
+    name: Deploy to ECS
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assume the app role by OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_APP_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check whether the service is currently up
+        id: check
+        run: |
+          active=$(aws ecs describe-services \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --query 'length(services[?status==`ACTIVE`])' \
+            --output text 2>/dev/null || echo 0)
+          echo "active=${active}" >> "$GITHUB_OUTPUT"
+          if [ "${active}" = "0" ]; then
+            echo "::notice::Ephemeral layer is down, so there is no service to update. Image ${IMAGE} is in ECR and will be used at the next env-up."
+          fi
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+
+      - name: Register a task definition revision with the new image
+        if: steps.check.outputs.active != '0'
+        id: register
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${TASK_FAMILY}" \
+            --query 'taskDefinition' > current.json
+
+          jq --arg image "${IMAGE}" --arg name "${CONTAINER_NAME}" '
+            (.containerDefinitions[] | select(.name == $name) | .image) = $image
+            | del(
+                .taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .compatibilities, .registeredAt, .registeredBy, .deregisteredAt
+              )
+          ' current.json > next.json
+
+          arn=$(aws ecs register-task-definition \
+            --cli-input-json file://next.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "arn=${arn}" >> "$GITHUB_OUTPUT"
+          echo "Registered ${arn}"
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+
+      - name: Update the service and wait for it to stabilise
+        if: steps.check.outputs.active != '0'
+        run: |
+          aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --task-definition "${ARN}" \
+            --no-cli-pager > /dev/null
+
+          aws ecs wait services-stable \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}"
+
+          echo "### Deployed \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          ARN: ${{ steps.register.outputs.arn }}
+          IMAGE: ${{ needs.build.outputs.image }}
