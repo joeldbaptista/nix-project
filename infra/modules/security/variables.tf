@@ -18,3 +18,8 @@ variable "app_port" {
   type        = number
   default     = 8080
 }
+
+variable "s3_prefix_list_id" {
+  description = "Prefix list of the S3 gateway endpoint, from the network module."
+  type        = string
+}

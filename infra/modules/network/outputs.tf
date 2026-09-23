@@ -19,3 +19,8 @@ output "private_subnet_ids" {
 output "private_route_table_id" {
   value = aws_route_table.private.id
 }
+
+output "s3_prefix_list_id" {
+  description = "Prefix list the S3 gateway endpoint routes. Security groups need it to permit egress to S3."
+  value       = aws_vpc_endpoint.s3.prefix_list_id
+}

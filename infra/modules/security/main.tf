@@ -101,6 +101,20 @@ resource "aws_vpc_security_group_egress_rule" "bastion_dns_udp" {
   to_port           = 53
 }
 
+# ECR stores image layers in S3, and a task fetches them through the free S3
+# gateway endpoint. That traffic is addressed to S3's public address range
+# rather than to an endpoint network interface, so a rule referencing the
+# endpoints security group does not cover it. Without this rule an image pull
+# fails with a connection timeout.
+resource "aws_vpc_security_group_egress_rule" "tasks_to_s3" {
+  security_group_id = aws_security_group.tasks.id
+  description       = "HTTPS to S3 through the gateway endpoint, for ECR image layers."
+  prefix_list_id    = var.s3_prefix_list_id
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+}
+
 resource "aws_vpc_security_group_egress_rule" "tasks_dns_udp" {
   security_group_id = aws_security_group.tasks.id
   description       = "DNS to the VPC resolver."

@@ -15,10 +15,11 @@ module "network" {
 module "security" {
   source = "../../modules/security"
 
-  project  = var.project
-  vpc_id   = module.network.vpc_id
-  vpc_cidr = module.network.vpc_cidr
-  app_port = var.app_port
+  project           = var.project
+  vpc_id            = module.network.vpc_id
+  vpc_cidr          = module.network.vpc_cidr
+  app_port          = var.app_port
+  s3_prefix_list_id = module.network.s3_prefix_list_id
 }
 
 module "ecr" {
