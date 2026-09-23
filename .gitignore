@@ -1,0 +1,37 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+
+# Variable files hold the repository slug and the notification email, so they
+# stay out of the repository. The .example files are committed instead.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# The lock file IS committed on purpose: it pins provider versions so that a
+# pipeline run resolves the same providers a local run did.
+!.terraform.lock.hcl
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# draw.io backups
+*.drawio.bkp
+*.drawio.dtmp
+
+# Mine
+PLAN.md
+STATUS.md

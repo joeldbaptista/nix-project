@@ -1,0 +1,28 @@
+# The repository root carries a .gitignore covering the same Python entries.
+# This file repeats them so that app/ stands on its own, which matters because
+# the app pipeline treats this directory as a self-contained unit.
+
+# Virtual environment
+.venv/
+
+# Bytecode and tool caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# Build output. The image builds the wheel inside the container, so anything
+# here came from a local `pip install .` or `hatch build` and is disposable.
+build/
+dist/
+*.egg-info/
+
+# A locally built fortune cookie database. The real one is created during the
+# image build at /opt/data/cookie.duckdb and never leaves the image, so a file
+# of this kind in the source tree is a stray artefact.
+*.duckdb
+*.duckdb.wal
+
+# macOS
+.DS_Store
