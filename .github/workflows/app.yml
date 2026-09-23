@@ -1,0 +1,47 @@
+name: app
+
+# Path filter, as the diagram specifies: only a change under app/ runs this
+# pipeline. A change under infra/ runs the infra pipeline instead.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/app.yml"
+  workflow_dispatch:
+
+# Read-only. This pipeline neither authenticates to AWS nor writes anything, so
+# it needs no id-token permission.
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint code
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install --quiet -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+
+  test:
+    name: Run unit tests
+    needs: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install --quiet -e ".[dev]"
+      - run: pytest -q
