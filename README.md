@@ -64,14 +64,10 @@ Four workflows, and this list is complete.
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `app.yml` | Push to `main` under `app/**` | Lint and test. **TODO:** build, push to ECR and deploy are not yet wired up |
+| `app.yml` | Push to `main` under `app/**` | Lint, test, build, push to ECR, update the ECS service |
 | `infra.yml` | Push to `main` under `infra/**` | `terraform plan` on every push, then `apply` behind the approval gate |
 | `env-down.yml` | 21:00 UTC nightly, or manual | Destroys the ephemeral layer |
 | `env-up.yml` | Manual | Recreates the ephemeral layer and rolls the service onto the newest image |
-
-Because `app.yml` does not deploy, a code change currently reaches the
-running service only through `make seed` in `app/`, followed by `make up` in
-`infra/` or a run of `env-up`.
 
 The two path filters are mutually exclusive in practice: a change under `app/`
 runs the app pipeline, and a change under `infra/` runs the infra pipeline.
