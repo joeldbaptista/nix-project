@@ -1,7 +1,5 @@
 name: app
 
-# Path filter, as the diagram specifies: only a change under app/ runs this
-# pipeline. A change under infra/ runs the infra pipeline instead.
 on:
   push:
     branches: [main]
@@ -10,8 +8,6 @@ on:
       - ".github/workflows/app.yml"
   workflow_dispatch:
 
-# Read-only. This pipeline neither authenticates to AWS nor writes anything, so
-# it needs no id-token permission.
 permissions:
   contents: read
 
