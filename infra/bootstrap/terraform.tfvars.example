@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+
+github_repo               = "OWNER/REPO"
+
+# Required when the repository uses immutable OIDC subject claims, which is
+# now the default. Read the exact value with:
+#   gh api repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
+# Leave it out only if that command reports the classic "repo:OWNER/REPO".
+github_subject_prefix     = "repo:OWNER@1234/REPO@5678"
+budget_notification_email = "you@example.com"
+
+# Defaults, shown for reference. Uncomment only to change them.
+# region             = "eu-west-1"
+# project            = "fortune"
+# github_branch      = "main"
+# github_environment = "infra-apply"
+# budget_limit_amount = "50"
+# budget_limit_unit   = "USD"
+
+# Set to false only if the GitHub OIDC provider already exists in this account.
+# create_oidc_provider = true
