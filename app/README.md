@@ -110,20 +110,14 @@ ever run locally.
 
 ## How a change reaches production
 
-> **TODO.** The app pipeline currently runs the linter and the tests only.
-> Building the image, pushing it to ECR and updating the ECS service are not
-> yet wired up. The rest of this section describes the intended design.
+Pushing to `main` under `app/**` triggers `.github/workflows/app.yml`, which
+runs four jobs: lint, test, build and deploy. Those cover the diagram's five
+stages, because pushing to ECR is a step inside the build job rather than a job
+of its own.
 
-As built today, pushing to `main` under `app/**` triggers
-`.github/workflows/app.yml`, which runs two jobs: lint and test. Nothing
-is deployed, so a code change reaches the running service only through
-`make seed`, followed by `make up` in `infra/` or the `env-up` workflow.
-
-The intended design is as follows. Pushing to `main` under `app/**` runs five
-jobs in order: lint, test, build, push, deploy. The image carries two tags,
-the full commit SHA and a moving `main` pointer. The SHA tag is what the task
-definition references, so every running task is traceable to a commit, which
-`GET /` reports as `commit`.
+The image carries two tags, the full commit SHA and a moving `main` pointer.
+The SHA tag is what the task definition references, so every running task is
+traceable to a commit, which `GET /` reports as `commit`.
 
 Terraform owns the shape of the task definition and this pipeline owns only the
 image tag. So the deploy job reads the current revision, replaces the image,
