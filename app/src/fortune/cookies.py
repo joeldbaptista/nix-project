@@ -32,6 +32,7 @@ SAYINGS: tuple[str, ...] = (
     "Fortune favours the prepared mind.",
     "Do not mistake activity for achievement.",
     "The best time to plant a tree was twenty years ago. The second best time is now.",
+    "To be sure of hitting your target, shoot first, then call whatever you hit the target.",
 )
 
 # Where the built database sits inside the image. The Dockerfile sets this
