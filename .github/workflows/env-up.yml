@@ -1,0 +1,95 @@
+name: env-up
+
+# Recreates the ephemeral layer that env-down destroyed. It takes a few minutes,
+# and it ends with the service running the most recent image in ECR.
+on:
+  workflow_dispatch:
+  # Uncomment to bring the environment up automatically on weekday mornings.
+  # Leaving it manual means the environment costs nothing on a day you do not
+  # work on it.
+  # schedule:
+  #   - cron: "0 7 * * 1-5"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_IN_AUTOMATION: "true"
+
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Apply the ephemeral layer
+    runs-on: ubuntu-latest
+    environment: env-lifecycle
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.0"
+          terraform_wrapper: false
+
+      - name: Assume the apply role by OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform apply
+        id: apply
+        working-directory: infra/layers/ephemeral
+        run: |
+          terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}"
+          terraform apply -input=false -auto-approve -lock-timeout=5m \
+            -var="state_bucket=${TF_STATE_BUCKET}"
+
+      # The service comes back on the task definition revision Terraform holds,
+      # which may be older than the newest image if the app pipeline ran while
+      # the environment was down. So the newest image is put back on the
+      # service explicitly.
+      - name: Roll the service onto the newest image
+        working-directory: infra/layers/ephemeral
+        run: |
+          account=$(aws sts get-caller-identity --query Account --output text)
+          image="${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/fortune/app:main"
+
+          aws ecs describe-task-definition \
+            --task-definition fortune-app \
+            --query 'taskDefinition' > current.json
+
+          jq --arg image "${image}" '
+            (.containerDefinitions[] | select(.name == "app") | .image) = $image
+            | del(
+                .taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .compatibilities, .registeredAt, .registeredBy, .deregisteredAt
+              )
+          ' current.json > next.json
+
+          arn=$(aws ecs register-task-definition \
+            --cli-input-json file://next.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          aws ecs update-service \
+            --cluster fortune --service app \
+            --task-definition "${arn}" --no-cli-pager > /dev/null
+          aws ecs wait services-stable --cluster fortune --services app
+
+      - name: Report how to reach the service
+        working-directory: infra/layers/ephemeral
+        run: |
+          {
+            echo "### Environment is up"
+            echo ""
+            echo "There is no public ingress, so reach it through the bastion:"
+            echo '```'
+            terraform output -json verify_commands | jq -r '.open_session, .port_forward'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,63 @@
+name: env-down
+
+# Destroys the ephemeral layer, which is every hourly-billed resource in the
+# project: the three interface endpoints, the ECS service, and the bastion.
+# It takes the environment from roughly 38 EUR a month to roughly 1 EUR.
+#
+# Nothing here is merely stopped. Interface endpoints cannot be stopped at all,
+# and a stopped EC2 instance still incurs its EBS charge, so destruction is the
+# only measure that actually reaches zero.
+on:
+  schedule:
+    # 21:00 UTC nightly. GitHub disables scheduled workflows after 60 days of
+    # repository inactivity, so the schedule needs an occasional push to stay
+    # alive.
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_IN_AUTOMATION: "true"
+
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    name: Destroy the ephemeral layer
+    runs-on: ubuntu-latest
+
+    # An unprotected environment on purpose: a nightly teardown cannot wait for
+    # a reviewer. The apply role trusts this subject as well as the gated one,
+    # so this environment is as privileged as an approved apply.
+    environment: env-lifecycle
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.0"
+          terraform_wrapper: false
+
+      - name: Assume the apply role by OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Only the ephemeral layer is ever named here. The durable layer holds
+      # the VPC, the ECR repository and the IAM roles, and it must survive.
+      - name: terraform destroy
+        working-directory: infra/layers/ephemeral
+        run: |
+          terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}"
+          terraform destroy -input=false -auto-approve -lock-timeout=5m \
+            -var="state_bucket=${TF_STATE_BUCKET}"
+          echo "### Ephemeral layer destroyed" >> "$GITHUB_STEP_SUMMARY"

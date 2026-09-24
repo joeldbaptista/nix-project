@@ -1,0 +1,153 @@
+name: infra
+
+# Path filter, as the diagram specifies: only a change under infra/ runs
+# this pipeline. A change under app/ runs the app pipeline instead.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - ".github/workflows/infra.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_IN_AUTOMATION: "true"
+
+# A second push while an apply waits for approval would race the first one over
+# the state lock, so runs are serialised rather than cancelled.
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: terraform plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.0"
+          terraform_wrapper: false
+
+      # Read-only role. It runs unattended on every push, so if it leaked it
+      # could read the account but change nothing.
+      - name: Assume the plan role by OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+        working-directory: infra
+
+      - name: Plan the durable layer
+        working-directory: infra/layers/durable
+        run: |
+          terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}"
+          terraform validate
+          terraform plan -input=false -lock-timeout=5m -out=tfplan
+          {
+            echo "### Durable layer plan"
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The plan file travels through the state bucket rather than through a
+      # workflow artifact. On a public repository an artifact is downloadable
+      # by anyone, and a plan file carries the full resource detail of the
+      # account. The bucket is private and both roles already reach it.
+      - name: Hand the durable plan to the apply job
+        working-directory: infra/layers/durable
+        run: |
+          aws s3 cp tfplan "s3://${TF_STATE_BUCKET}/plans/${GITHUB_RUN_ID}/durable.tfplan"
+
+      # The ephemeral layer reads the durable layer's outputs, so it cannot be
+      # planned before the durable layer has ever been applied. On a first run
+      # that state file does not exist yet, which is expected rather than a
+      # failure.
+      - name: Plan the ephemeral layer
+        id: plan_ephemeral
+        working-directory: infra/layers/ephemeral
+        run: |
+          if ! aws s3api head-object --bucket "${TF_STATE_BUCKET}" --key durable/terraform.tfstate >/dev/null 2>&1; then
+            echo "::notice::Durable layer has never been applied, so the ephemeral layer cannot be planned yet."
+            echo "planned=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}"
+          terraform validate
+          terraform plan -input=false -lock-timeout=5m \
+            -var="state_bucket=${TF_STATE_BUCKET}" -out=tfplan
+          {
+            echo "### Ephemeral layer plan"
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "planned=true" >> "$GITHUB_OUTPUT"
+
+  apply:
+    name: terraform apply
+    needs: plan
+    runs-on: ubuntu-latest
+
+    # This is the manual approval gate from the diagram. The environment's
+    # required-reviewer rule holds the job here. It is also what makes the
+    # OIDC subject claim environment-scoped, and the apply role trusts only
+    # that claim, so an unapproved apply is refused by AWS itself rather than
+    # merely hidden by the GitHub interface.
+    environment: infra-apply
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.0"
+          terraform_wrapper: false
+
+      - name: Assume the apply role by OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # The saved plan file is applied, not a freshly computed one, so what is
+      # applied is exactly what was reviewed and approved.
+      - name: Apply the durable layer
+        working-directory: infra/layers/durable
+        run: |
+          aws s3 cp "s3://${TF_STATE_BUCKET}/plans/${GITHUB_RUN_ID}/durable.tfplan" tfplan
+          terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}"
+          terraform apply -input=false -lock-timeout=5m tfplan
+          aws s3 rm "s3://${TF_STATE_BUCKET}/plans/${GITHUB_RUN_ID}/durable.tfplan"
+
+      # The ephemeral layer is planned again here rather than applied from the
+      # artifact, because the durable apply above may have changed the outputs
+      # it consumes. It is applied automatically once the run is approved: it
+      # is recreated wholesale every morning by env-up anyway, so a separate
+      # review of it would be inconsistent. Nothing in this job runs before the
+      # approval, so the gate still covers both layers.
+      - name: Apply the ephemeral layer
+        working-directory: infra/layers/ephemeral
+        run: |
+          terraform init -input=false -backend-config="bucket=${TF_STATE_BUCKET}"
+          terraform plan -input=false -lock-timeout=5m \
+            -var="state_bucket=${TF_STATE_BUCKET}" -out=tfplan
+          {
+            echo "### Ephemeral layer applied"
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          terraform apply -input=false -lock-timeout=5m tfplan
