@@ -73,13 +73,47 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Only the commit SHA tag is applied here. The moving `main` tag is
+      # applied by the promote job, after the deployment has succeeded, so a
+      # broken image never becomes the tag that env-up brings the service up on.
       - name: Build container image
         run: |
           docker build \
             --build-arg GIT_SHA="${GITHUB_SHA}" \
             -t "${REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
-            -t "${REGISTRY}/${ECR_REPOSITORY}:main" \
             .
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+
+      # Unit tests prove the code imports and answers in-process. They do not
+      # prove the image starts, so the container is run and both endpoints are
+      # called before anything is pushed.
+      - name: Smoke-test the image
+        run: |
+          docker run -d -p 8080:8080 --name smoke \
+            "${REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" >/dev/null
+
+          # Polled rather than slept, so a fast start is not penalised and a
+          # slow one still gets its full allowance.
+          ready=""
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ -z "${ready}" ]; then
+            echo "::error::The container did not answer /health within 30 seconds."
+            docker logs smoke || true
+            docker rm -f smoke >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          echo "GET /health -> $(curl -fsS http://localhost:8080/health)"
+          echo "GET /       -> $(curl -fsS http://localhost:8080/)"
+          docker rm -f smoke >/dev/null
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
 
@@ -87,7 +121,6 @@ jobs:
         id: push
         run: |
           docker push "${REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
-          docker push "${REGISTRY}/${ECR_REPOSITORY}:main"
           echo "image=${REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
@@ -113,7 +146,7 @@ jobs:
             --output text 2>/dev/null || echo 0)
           echo "active=${active}" >> "$GITHUB_OUTPUT"
           if [ "${active}" = "0" ]; then
-            echo "::notice::Ephemeral layer is down, so there is no service to update. Image ${IMAGE} is in ECR and will be used at the next env-up."
+            echo "::notice::Ephemeral layer is down, so there is no service to update. Image ${IMAGE} is in ECR, it passed the smoke test, and the promote job will point main at it so the next env-up uses it."
           fi
         env:
           IMAGE: ${{ needs.build.outputs.image }}
@@ -160,3 +193,60 @@ jobs:
         env:
           ARN: ${{ steps.register.outputs.arn }}
           IMAGE: ${{ needs.build.outputs.image }}
+
+  # The moving `main` tag is what env-up brings the service up on, so it must
+  # never point at an image that failed its smoke test or its deployment. This
+  # job therefore runs last, and only when both earlier jobs succeeded.
+  #
+  # It runs even when the deploy job found no running service, because that job
+  # succeeds in that case: the image is built and verified, and the environment
+  # is simply down. Skipping the promotion there would leave main on the
+  # previous image and the next env-up would start stale code.
+  promote:
+    name: Promote the main tag
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assume the app role by OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_APP_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Retagging is done through the registry API rather than by pulling and
+      # pushing. The manifest is copied server side, so no image layer moves and
+      # the two tags are guaranteed to reference the identical image.
+      - name: Point main at the deployed image
+        run: |
+          image=$(aws ecr batch-get-image \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-ids imageTag="${GITHUB_SHA}" \
+            --query 'images[0]' \
+            --output json)
+
+          manifest=$(printf '%s' "${image}" | jq -r '.imageManifest')
+          media_type=$(printf '%s' "${image}" | jq -r '.imageManifestMediaType')
+
+          if [ -z "${manifest}" ] || [ "${manifest}" = "null" ]; then
+            echo "::error::No image tagged ${GITHUB_SHA} found in ${ECR_REPOSITORY}."
+            exit 1
+          fi
+
+          # A re-run of the same commit finds main already on this manifest, and
+          # ECR rejects that as ImageAlreadyExistsException. That is the desired
+          # end state, so it is reported rather than treated as a failure.
+          if out=$(aws ecr put-image \
+              --repository-name "${ECR_REPOSITORY}" \
+              --image-tag main \
+              --image-manifest "${manifest}" \
+              --image-manifest-media-type "${media_type}" \
+              --no-cli-pager 2>&1); then
+            echo "main now points at ${GITHUB_SHA}"
+          elif printf '%s' "${out}" | grep -q 'ImageAlreadyExistsException'; then
+            echo "main already points at ${GITHUB_SHA}, so there is nothing to do."
+          else
+            printf '%s\n' "${out}" >&2
+            exit 1
+          fi
+
+          echo "### Promoted \`main\` to \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
